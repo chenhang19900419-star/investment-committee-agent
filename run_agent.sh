@@ -1,5 +1,16 @@
 #!/bin/bash
 
+# Load from .env if it exists
+if [ -f .env ]; then
+    export $(grep -v '^#' .env | xargs)
+    echo "✅ Loaded configuration from .env"
+    echo "Provider: $OPENAI_BASE_URL"
+    echo "Model:    $OPENAI_MODEL_NAME"
+    echo "---------------------------------------------------------"
+    python3 investment_committee.py
+    exit 0
+fi
+
 echo "🚀 Starting Investment Committee Agent Configuration..."
 echo "---------------------------------------------------------"
 echo "Select your AI Provider:"
