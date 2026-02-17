@@ -112,19 +112,29 @@ class InvestmentCommitteeAgent:
         print("="*60)
         
         report_content = f"# Investment Committee Report: {trade_idea}\n\n"
+        
+        scores = {}
+        verdicts = {}
 
         for p in targets:
             system_prompt = self.personas[p]
             
-            # Add specific instruction to be concise for the committee report
-            # The original prompts are quite detailed, which is good.
+            # Add instruction for structured output (Score & Verdict)
+            structured_instruction = """
+IMPORTANT: At the end of your analysis, you MUST provide a structured summary in exactly this format:
+---
+SCORE: [0-10]
+VERDICT: [YES/NO/WATCH]
+REASON: [One short sentence]
+---
+"""
             
             print(f"\n👤 Consulting {p.upper()}...")
             try:
                 response = self.client.chat.completions.create(
                     model=self.model,
                     messages=[
-                        {"role": "system", "content": system_prompt},
+                        {"role": "system", "content": system_prompt + structured_instruction},
                         {"role": "user", "content": f"Please analyze this trade idea:\n{trade_idea}"}
                     ],
                     temperature=0.7
@@ -135,6 +145,15 @@ class InvestmentCommitteeAgent:
                 print(analysis)
                 print("-" * 40)
                 
+                # Extract score and verdict
+                match_score = re.search(r'SCORE:\s*(\d+(\.\d+)?)', analysis)
+                match_verdict = re.search(r'VERDICT:\s*(YES|NO|WATCH)', analysis, re.IGNORECASE)
+                
+                if match_score:
+                    scores[p] = float(match_score.group(1))
+                if match_verdict:
+                    verdicts[p] = match_verdict.group(1).upper()
+                
                 report_content += f"## {p.capitalize()}'s Perspective\n\n{analysis}\n\n---\n\n"
                 
             except Exception as e:
@@ -143,10 +162,46 @@ class InvestmentCommitteeAgent:
                 report_content += f"## {p.capitalize()}'s Perspective\n\n{error_msg}\n\n"
 
         print("\n" + "="*60)
+        
+        # Calculate Final Score
+        if scores:
+            avg_score = sum(scores.values()) / len(scores)
+            
+            # Weighted Consensus Logic
+            # If Taleb says NO (Score < 3), the whole deal might be killed (Veto power on ruin risk)
+            taleb_score = scores.get('taleb', 10)
+            if taleb_score < 3:
+                final_verdict = "VETOED (Risk of Ruin)"
+                avg_score = min(avg_score, taleb_score) # Cap score at Taleb's level
+            elif avg_score >= 7.5:
+                final_verdict = "STRONG BUY"
+            elif avg_score >= 6.0:
+                final_verdict = "BUY / ACCUMULATE"
+            elif avg_score >= 4.0:
+                final_verdict = "HOLD / WATCH"
+            else:
+                final_verdict = "SELL / AVOID"
+                
+            summary = f"""
+## 🏁 FINAL COMMITTEE VERDICT
+
+**Composite Score**: {avg_score:.1f} / 10
+**Decision**: {final_verdict}
+
+### Vote Breakdown:
+"""
+            for p in targets:
+                s = scores.get(p, "N/A")
+                v = verdicts.get(p, "N/A")
+                summary += f"- **{p.capitalize()}**: {s}/10 ({v})\n"
+            
+            print(summary)
+            report_content = summary + "\n---\n" + report_content
+            
         print("🏁 Committee Session Adjourned.")
         
         # Save report
-        filename = f"report_{trade_idea[:20].replace(' ', '_')}.md"
+        filename = f"report_{trade_idea[:20].replace(' ', '_').replace('/', '-')}.md"
         with open(filename, "w", encoding="utf-8") as f:
             f.write(report_content)
         print(f"📄 Report saved to: {filename}")
