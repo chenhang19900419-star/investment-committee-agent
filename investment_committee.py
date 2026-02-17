@@ -67,9 +67,21 @@ class InvestmentCommitteeAgent:
              print(f"❌ Error initializing OpenAI client: {e}")
              sys.exit(1)
              
-        # 3. Load Personas
+        # 2. Load Personas
         self.personas = {}
+        self.lessons = "" # Memory Bank
         self._load_personas()
+        self._load_lessons()
+
+    def _load_lessons(self):
+        """Load past lessons/principles."""
+        path = os.path.join(KNOWLEDGE_DIR, "lessons.md")
+        if os.path.exists(path):
+            with open(path, 'r', encoding='utf-8') as f:
+                self.lessons = f.read()
+            print("🧠 Memory Loaded: lessons.md (Principles & Past Mistakes)")
+        else:
+            print("⚠️ Memory Empty: No lessons.md found.")
 
     def _load_personas(self):
         """Load system prompts from knowledge files."""
@@ -119,13 +131,19 @@ class InvestmentCommitteeAgent:
         for p in targets:
             system_prompt = self.personas[p]
             
+            # Inject Past Lessons (The "Learning" Mechanism)
+            if self.lessons:
+                system_prompt += f"\n\n### 🧠 MEMORY & PRINCIPLES (FROM PAST TRADES):\n{self.lessons}\n\n(IMPORTANT: Use these principles to guide your current analysis. Do not repeat past mistakes.)"
+
             # Add instruction for structured output (Score & Verdict)
             structured_instruction = """
-IMPORTANT: At the end of your analysis, you MUST provide a structured summary in exactly this format:
+IMPORTANT: 
+1. Please output your analysis in **CHINESE (Simplified)**.
+2. At the end of your analysis, you MUST provide a structured summary in exactly this format:
 ---
 SCORE: [0-10]
 VERDICT: [YES/NO/WATCH]
-REASON: [One short sentence]
+REASON: [One short sentence in Chinese]
 ---
 """
             
@@ -154,12 +172,12 @@ REASON: [One short sentence]
                 if match_verdict:
                     verdicts[p] = match_verdict.group(1).upper()
                 
-                report_content += f"## {p.capitalize()}'s Perspective\n\n{analysis}\n\n---\n\n"
+                report_content += f"## {p.capitalize()} 视角\n\n{analysis}\n\n---\n\n"
                 
             except Exception as e:
                 error_msg = f"❌ Error consulting {p}: {e}"
                 print(error_msg)
-                report_content += f"## {p.capitalize()}'s Perspective\n\n{error_msg}\n\n"
+                report_content += f"## {p.capitalize()} 视角\n\n{error_msg}\n\n"
 
         print("\n" + "="*60)
         
@@ -174,21 +192,21 @@ REASON: [One short sentence]
                 final_verdict = "VETOED (Risk of Ruin)"
                 avg_score = min(avg_score, taleb_score) # Cap score at Taleb's level
             elif avg_score >= 7.5:
-                final_verdict = "STRONG BUY"
+                final_verdict = "STRONG BUY (强力推荐)"
             elif avg_score >= 6.0:
-                final_verdict = "BUY / ACCUMULATE"
+                final_verdict = "BUY / ACCUMULATE (买入/积累)"
             elif avg_score >= 4.0:
-                final_verdict = "HOLD / WATCH"
+                final_verdict = "HOLD / WATCH (持有/观察)"
             else:
-                final_verdict = "SELL / AVOID"
+                final_verdict = "SELL / AVOID (卖出/回避)"
                 
             summary = f"""
-## 🏁 FINAL COMMITTEE VERDICT
+## 🏁 投资委员会最终决议 (FINAL VERDICT)
 
-**Composite Score**: {avg_score:.1f} / 10
-**Decision**: {final_verdict}
+**综合评分**: {avg_score:.1f} / 10
+**决策建议**: {final_verdict}
 
-### Vote Breakdown:
+### 投票明细:
 """
             for p in targets:
                 s = scores.get(p, "N/A")
@@ -206,16 +224,57 @@ REASON: [One short sentence]
             f.write(report_content)
         print(f"📄 Report saved to: {filename}")
 
+    def update_principles(self, trade_name: str, outcome: str, lessons_learned: str):
+        """
+        Auto-update the lessons.md file with new principles.
+        """
+        path = os.path.join(KNOWLEDGE_DIR, "lessons.md")
+        
+        # Structure the new entry
+        new_entry = f"""
+## 交易复盘: {trade_name}
+- **结果**: {outcome}
+- **教训**: {lessons_learned}
+- **新原则**: [自动生成] 当 {lessons_learned.split(' ')[0]} 发生时，总是检查...
+"""
+        
+        # In a real agent, we would use an LLM to refine the principle.
+        # For now, let's append it directly or use LLM to format it.
+        
+        prompt = f"""
+        请根据以下交易复盘结果，提炼一条简洁、可执行的“硬性规则”或“投资原则”（使用中文Markdown格式）：
+        
+        交易名称: {trade_name}
+        结果: {outcome}
+        教训: {lessons_learned}
+        
+        请只输出原则内容，不要包含其他废话。
+        """
+        
+        try:
+            response = self.client.chat.completions.create(
+                model=self.model,
+                messages=[{"role": "user", "content": prompt}]
+            )
+            refined_principle = response.choices[0].message.content.strip()
+            
+            with open(path, "a", encoding="utf-8") as f:
+                f.write(f"\n\n{refined_principle}")
+            
+            print(f"🧠 Principles Updated in {path}")
+            # Reload memory
+            self._load_lessons() # Fixed indentation here
+            
+        except Exception as e:
+            print(f"❌ Failed to update principles: {e}")
+
 def main():
     print("""
 #######################################################
 #   🏛️  INVESTMENT COMMITTEE AGENT (5-EYES)  🏛️   #
 #                                                     #
-#   1. Buffett (Value & Moat)                         #
-#   2. Lynch (Growth & PEG)                           #
-#   3. Soros (Reflexivity & False Narratives)         #
-#   4. Marks (Cycles & Risk First)                    #
-#   5. Taleb (Tail Risk & Convexity)                  #
+#   1. Analyze Trade (Type your idea)                 #
+#   2. Add Lesson (Type 'learn: [Trade] [Result]...') #
 #######################################################
     """)
     
@@ -227,14 +286,30 @@ def main():
 
     while True:
         try:
-            user_input = input("\n> Enter Trade Idea (or 'exit'): ")
+            user_input = input("\n> Enter Command (or 'exit'): ")
             if user_input.lower() in ['exit', 'quit']:
                 break
             
             if not user_input.strip():
                 continue
                 
-            agent.analyze(user_input)
+            # Check for "learn:" command
+            if user_input.lower().startswith("learn:"):
+                # Expected format: learn: Tesla Short, Lost 20%, Don't fight trend
+                try:
+                    parts = user_input[6:].split(',')
+                    if len(parts) >= 2:
+                        trade = parts[0].strip()
+                        outcome = parts[1].strip()
+                        lesson = ",".join(parts[2:]).strip() if len(parts) > 2 else "General Observation"
+                        agent.update_principles(trade, outcome, lesson)
+                    else:
+                        print("⚠️ Usage: learn: [Trade Name], [Outcome], [Lesson Learned]")
+                except Exception as e:
+                     print(f"⚠️ Error parsing learn command: {e}")
+            else:
+                # Default to analyze
+                agent.analyze(user_input)
             
         except KeyboardInterrupt:
             print("\nExiting...")
