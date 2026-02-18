@@ -216,7 +216,8 @@ class InvestmentCommitteeAgent:
             "lynch": "lynch.md",
             "soros": "soros.md",
             "marks": "marks.md",
-            "taleb": "taleb.md"
+            "taleb": "taleb.md",
+            "templeton": "templeton.md"
         }
         
         print(f"📚 Loading investment philosophies from {KNOWLEDGE_DIR}...")
