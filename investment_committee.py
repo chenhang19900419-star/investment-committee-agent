@@ -5,13 +5,18 @@ from typing import Dict, List, Optional
 try:
     from openai import OpenAI
     import httpx
+    import yfinance as yf
+    import pandas as pd
 except ImportError:
-    print("Error: 'openai' or 'httpx' library not found. Please run: pip install openai httpx")
+    print("Error: Required libraries not found. Please run: pip install openai httpx yfinance pandas")
     sys.exit(1)
 
 # Default paths
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 KNOWLEDGE_DIR = os.path.join(BASE_DIR, "knowledge")
+DOCS_DIR = os.path.join(KNOWLEDGE_DIR, "docs")
+PORTFOLIO_FILE = os.path.join(BASE_DIR, "portfolio", "holdings.md")
+LOGS_DIR = os.path.join(BASE_DIR, "logs")
 
 class InvestmentCommitteeAgent:
     def __init__(self, api_key: Optional[str] = None, base_url: Optional[str] = None, model: Optional[str] = None):
@@ -70,8 +75,129 @@ class InvestmentCommitteeAgent:
         # 2. Load Personas
         self.personas = {}
         self.lessons = "" # Memory Bank
+        self.docs_index = {} # Simple document index
+        self.portfolio_data = "" # Portfolio Context
+        
         self._load_personas()
         self._load_lessons()
+        self._load_portfolio()
+        self._index_docs()
+
+    def _load_portfolio(self):
+        """Load current portfolio holdings."""
+        if os.path.exists(PORTFOLIO_FILE):
+            with open(PORTFOLIO_FILE, 'r', encoding='utf-8') as f:
+                self.portfolio_data = f.read()
+            print("📊 Portfolio Loaded: holdings.md")
+        else:
+            print("⚠️ Portfolio Empty: No holdings.md found.")
+
+    def fetch_market_data(self, ticker: str) -> str:
+        """
+        Fetch real-time market data using yfinance.
+        """
+        try:
+            print(f"📊 Fetching data for ticker: {ticker}...")
+            stock = yf.Ticker(ticker)
+            
+            # Get historical data for momentum
+            hist = stock.history(period="1mo")
+            if hist.empty:
+                return f"⚠️ Could not fetch data for {ticker}. Check ticker symbol."
+            
+            current_price = hist['Close'].iloc[-1]
+            prev_close = hist['Close'].iloc[-2] if len(hist) > 1 else current_price
+            change_pct = ((current_price - prev_close) / prev_close) * 100
+            
+            # Calculate volatility (ATR-like)
+            hist['High-Low'] = hist['High'] - hist['Low']
+            avg_volatility = hist['High-Low'].mean()
+            volatility_pct = (avg_volatility / current_price) * 100
+            
+            # Fundamentals (if available)
+            info = stock.info
+            pe_ratio = info.get('forwardPE', info.get('trailingPE', 'N/A'))
+            market_cap = info.get('marketCap', 'N/A')
+            if isinstance(market_cap, (int, float)):
+                market_cap = f"{market_cap / 1e9:.2f}B"
+            
+            sector = info.get('sector', 'N/A')
+            industry = info.get('industry', 'N/A')
+            
+            data_summary = f"""
+### 📈 Real-Time Market Data ({ticker})
+- **Price**: {current_price:.2f} (Change: {change_pct:+.2f}%)
+- **Sector**: {sector} / {industry}
+- **Market Cap**: {market_cap}
+- **P/E Ratio**: {pe_ratio}
+- **Volatility (Daily Avg)**: {volatility_pct:.2f}% (High-Low Range)
+- **52-Week High**: {info.get('fiftyTwoWeekHigh', 'N/A')}
+- **52-Week Low**: {info.get('fiftyTwoWeekLow', 'N/A')}
+"""
+            return data_summary
+            
+        except Exception as e:
+            print(f"⚠️ Error fetching yfinance data: {e}")
+            return ""
+
+    def _index_docs(self):
+        """Index local documents for retrieval."""
+        if not os.path.exists(DOCS_DIR):
+            os.makedirs(DOCS_DIR)
+            return
+            
+        count = 0
+        for filename in os.listdir(DOCS_DIR):
+            if filename.endswith(('.md', '.txt')):
+                path = os.path.join(DOCS_DIR, filename)
+                with open(path, 'r', encoding='utf-8', errors='ignore') as f:
+                    content = f.read()
+                    self.docs_index[filename] = content
+                    count += 1
+        print(f"📚 Documents Indexed: {count} files found in knowledge/docs/")
+
+    def _retrieve_context(self, query: str) -> str:
+        """
+        Simple keyword-based retrieval.
+        In a production system, this would use vector embeddings (RAG).
+        """
+        if not self.docs_index:
+            return ""
+            
+        relevant_chunks = []
+        query_terms = set(re.findall(r'\w+', query.lower()))
+        
+        # Remove common stop words to improve basic matching
+        stop_words = {'the', 'a', 'an', 'in', 'on', 'at', 'for', 'to', 'of', 'is', 'are', 'was', 'were'}
+        query_terms = {t for t in query_terms if t not in stop_words and len(t) > 1}
+        
+        if not query_terms:
+            return ""
+
+        print(f"🔍 Searching docs for keywords: {query_terms}...")
+        
+        for filename, content in self.docs_index.items():
+            # Simple scoring: count keyword occurrences
+            score = 0
+            content_lower = content.lower()
+            for term in query_terms:
+                score += content_lower.count(term)
+            
+            if score > 0:
+                # If relevant, take a snippet around the keyword or the whole file if small
+                # For now, let's take the first 2000 chars if highly relevant, or full if small
+                snippet = f"--- Document: {filename} ---\n{content[:3000]}\n" 
+                if len(content) > 3000:
+                    snippet += "...(truncated)...\n"
+                relevant_chunks.append((score, snippet))
+        
+        # Sort by relevance and take top 3
+        relevant_chunks.sort(key=lambda x: x[0], reverse=True)
+        top_docs = [chunk[1] for chunk in relevant_chunks[:3]]
+        
+        if top_docs:
+            return "\n".join(top_docs)
+        return ""
 
     def _load_lessons(self):
         """Load past lessons/principles."""
@@ -127,10 +253,41 @@ class InvestmentCommitteeAgent:
         
         scores = {}
         verdicts = {}
+        
+        # 1. Retrieve Context from Docs
+        context = self._retrieve_context(trade_idea)
+        
+        # 1.5 Fetch Real-Time Data (if ticker detected)
+        market_data = ""
+        # Simple regex to find ticker symbols (e.g. AAPL, 0700.HK, 600519.SS)
+        # Matches: Uppercase 2-5 chars, or digits followed by .HK/.SS/.SZ
+        ticker_match = re.search(r'\b([A-Z]{2,5}|\d{4,6}\.(HK|SS|SZ|TW))\b', trade_idea)
+        if ticker_match:
+            ticker = ticker_match.group(1)
+            # yfinance needs suffixes for some exchanges
+            market_data = self.fetch_market_data(ticker)
+            if market_data:
+                report_content += market_data + "\n\n"
+
+        if context:
+            print(f"✅ Found relevant context ({len(context)} chars)")
+            report_content += "## 📚 参考文档 (Reference Docs)\n" + context[:500] + "...\n\n"
 
         for p in targets:
             system_prompt = self.personas[p]
             
+            # Inject Market Data (Real-Time)
+            if market_data:
+                system_prompt += f"\n\n### 📈 REAL-TIME MARKET DATA:\n{market_data}\n\n(IMPORTANT: Use this current price/PE/volatility in your valuation.)"
+
+            # Inject Docs Context (RAG)
+            if context:
+                 system_prompt += f"\n\n### 📚 REFERENCE DOCUMENTS (FACTS & DATA):\n{context}\n\n(IMPORTANT: Use these facts to support your analysis.)"
+            
+            # Inject Portfolio Context (Risk Management)
+            if self.portfolio_data:
+                system_prompt += f"\n\n### 📊 CURRENT PORTFOLIO (RISK CHECK):\n{self.portfolio_data}\n\n(IMPORTANT: Check if this new trade violates concentration limits or correlates too much with existing holdings.)"
+
             # Inject Past Lessons (The "Learning" Mechanism)
             if self.lessons:
                 system_prompt += f"\n\n### 🧠 MEMORY & PRINCIPLES (FROM PAST TRADES):\n{self.lessons}\n\n(IMPORTANT: Use these principles to guide your current analysis. Do not repeat past mistakes.)"
@@ -219,7 +376,13 @@ REASON: [One short sentence in Chinese]
         print("🏁 Committee Session Adjourned.")
         
         # Save report
-        filename = f"report_{trade_idea[:20].replace(' ', '_').replace('/', '-')}.md"
+        import datetime
+        today = datetime.datetime.now().strftime("%Y-%m-%d")
+        log_dir = os.path.join(LOGS_DIR, today)
+        if not os.path.exists(log_dir):
+            os.makedirs(log_dir)
+            
+        filename = f"{log_dir}/report_{trade_idea[:20].replace(' ', '_').replace('/', '-')}.md"
         with open(filename, "w", encoding="utf-8") as f:
             f.write(report_content)
         print(f"📄 Report saved to: {filename}")
@@ -271,10 +434,10 @@ REASON: [One short sentence in Chinese]
 def main():
     print("""
 #######################################################
-#   🏛️  INVESTMENT COMMITTEE AGENT (5-EYES)  🏛️   #
+#   ⚡️  GOD AGENT (OMNISCIENT INVESTMENT EYE)  ⚡️   #
 #                                                     #
-#   1. Analyze Trade (Type your idea)                 #
-#   2. Add Lesson (Type 'learn: [Trade] [Result]...') #
+#   1. Analyze Trade (Type ticker or idea)            #
+#   2. Add Lesson (Type 'learn: ...')                 #
 #######################################################
     """)
     
